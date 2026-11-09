@@ -1120,12 +1120,13 @@ TEST_F(StringFamilyTest, GetLargeRawBorrowed) {
 TEST_F(StringFamilyTest, GetLargeRawBorrowedSquashed) {
   auto get_info_stat = [this](std::string_view name) -> uint64_t {
     std::string stats = Run({"info", "stats"}).GetString();
-    std::string needle = absl::StrCat(name, ":");
-    size_t pos = stats.find(needle);
-    EXPECT_NE(pos, std::string::npos) << name;
-    if (pos == std::string::npos)
+    const std::string needle = StrCat(name, ":");
+    const size_t key_pos = stats.find(needle);
+    EXPECT_NE(key_pos, std::string::npos) << name;
+    if (key_pos == std::string::npos) {
       return 0;
-    pos += needle.size();
+    }
+    size_t pos = key_pos + needle.size();
     size_t line_end = stats.find("\r\n", pos);
     EXPECT_NE(line_end, std::string::npos) << name;
     if (line_end == std::string::npos)
@@ -1152,16 +1153,32 @@ TEST_F(StringFamilyTest, GetLargeRawBorrowedSquashed) {
   EXPECT_THAT(Run({"set", "k1", values[1]}), "OK");
   EXPECT_THAT(Run({"set", "k2", values[2]}), "OK");
 
+  const std::string ascii_value(16384, 'a');
+  EXPECT_THAT(Run({"set", "k3", ascii_value}), "OK");
+
+  const int k0_bit = values[0][0] & 1;
+
   // GET them inside MULTI/EXEC — this dispatches through MultiCommandSquasher,
   // so each GET reply is first captured then replayed to the real sink.
   EXPECT_EQ(Run({"multi"}), "OK");
   EXPECT_EQ(Run({"get", "k0"}), "QUEUED");
+  EXPECT_EQ(Run({"setbit", "k0", "7", StrCat(1 - k0_bit)}), "QUEUED");
   EXPECT_EQ(Run({"get", "k1"}), "QUEUED");
   EXPECT_EQ(Run({"get", "k2"}), "QUEUED");
+  EXPECT_EQ(Run({"get", "k3"}), "QUEUED");
+  EXPECT_EQ(Run({"setbit", "k3", "7", "0"}), "QUEUED");
   auto resp = Run({"exec"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(values[0], values[1], values[2])));
+  EXPECT_THAT(resp, RespArray(ElementsAre(values[0], IntArg(k0_bit), values[1], values[2],
+                                          ascii_value, IntArg(1))));
 
-  EXPECT_EQ(get_info_stat("borrowed_strings_sent_total"), initial_sent + 3);
+  EXPECT_EQ(get_info_stat("borrowed_strings_sent_total"), initial_sent + 4);
+
+  std::string k0_after = values[0];
+  k0_after[0] ^= 1;
+  std::string k3_after = ascii_value;
+  k3_after[0] = '`';
+  EXPECT_EQ(Run({"get", "k0"}), k0_after);
+  EXPECT_EQ(Run({"get", "k3"}), k3_after);
 }
 
 // Exercises the PendingRead pin/orphan/drain cycle through CompactObj's
